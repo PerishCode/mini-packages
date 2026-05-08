@@ -11,16 +11,25 @@ const version = `0.0.0-smoke.${Date.now()}`;
 const root = await mkdtemp(path.join(tmpdir(), 'mini-packages-e2e-'));
 
 try {
+  await verifyPing();
   await verifyTokenLifecycle();
   const { token } = await createToken(`e2e-${Date.now()}`);
   await writeNpmrc(root, token);
   await publishAndInstallWithNpm(token);
   await publishAndInstallWithPnpm(token);
+  await verifyLocalLinkWorkflows(token);
 } finally {
   if (!process.env.E2E_KEEP_TMP) {
     await rm(root, { recursive: true, force: true });
   } else {
     console.log(`kept temp workspace: ${root}`);
+  }
+}
+
+async function verifyPing() {
+  const response = await fetch(`${baseUrl}/-/ping`);
+  if (!response.ok) {
+    throw new Error(`ping failed: ${response.status} ${await response.text()}`);
   }
 }
 
@@ -99,10 +108,16 @@ async function writeNpmrc(dir, token) {
 async function publishAndInstallWithNpm(token) {
   const packageName = `${scope}/npm-pkg`;
   const packageDir = await createPackage('npm-pkg', packageName, token);
-  await run('npm', ['publish', '--registry', baseUrl, '--tag', 'npm-smoke', '--access', 'restricted'], {
+  await run('npm', ['publish', '--registry', baseUrl, '--tag', 'beta', '--access', 'restricted'], {
     cwd: packageDir,
     env: authEnv(token)
   });
+  await expectNpmDistTag(packageName, 'beta', version, token);
+  await run('npm', ['dist-tag', 'add', `${packageName}@${version}`, 'latest', '--registry', baseUrl], {
+    cwd: packageDir,
+    env: authEnv(token)
+  });
+  await expectNpmDistTag(packageName, 'latest', version, token);
   await run('npm', ['dist-tag', 'ls', packageName, '--registry', baseUrl], {
     cwd: packageDir,
     env: authEnv(token)
@@ -120,7 +135,11 @@ async function publishAndInstallWithNpm(token) {
   await mkdir(consumer, { recursive: true });
   await writeFile(path.join(consumer, 'package.json'), '{"private":true}\n');
   await writeNpmrc(consumer, token);
-  await run('npm', ['install', `${packageName}@${version}`, '--registry', baseUrl], {
+  await run('npm', ['install', `${packageName}@beta`, '--registry', baseUrl], {
+    cwd: consumer,
+    env: authEnv(token)
+  });
+  await run('npm', ['install', `${packageName}@latest`, '--registry', baseUrl], {
     cwd: consumer,
     env: authEnv(token)
   });
@@ -129,19 +148,44 @@ async function publishAndInstallWithNpm(token) {
 async function publishAndInstallWithPnpm(token) {
   const packageName = `${scope}/pnpm-pkg`;
   const packageDir = await createPackage('pnpm-pkg', packageName, token);
-  await run('pnpm', ['publish', '--registry', baseUrl, '--tag', 'pnpm-smoke', '--no-git-checks'], {
+  await run('pnpm', ['publish', '--registry', baseUrl, '--tag', 'beta', '--no-git-checks'], {
     cwd: packageDir,
     env: authEnv(token)
   });
+  await expectNpmDistTag(packageName, 'beta', version, token);
 
   const consumer = path.join(root, 'pnpm-consumer');
   await mkdir(consumer, { recursive: true });
   await writeFile(path.join(consumer, 'package.json'), '{"private":true}\n');
   await writeNpmrc(consumer, token);
-  await run('pnpm', ['add', `${packageName}@${version}`, '--registry', baseUrl], {
+  await run('pnpm', ['add', `${packageName}@beta`, '--registry', baseUrl], {
     cwd: consumer,
     env: authEnv(token)
   });
+}
+
+async function verifyLocalLinkWorkflows(token) {
+  const npmPackageName = `${scope}/npm-link-pkg`;
+  const npmPackageDir = await createPackage('npm-link-pkg', npmPackageName, token);
+  const npmConsumer = path.join(root, 'npm-link-consumer');
+  await mkdir(npmConsumer, { recursive: true });
+  await writeFile(path.join(npmConsumer, 'package.json'), '{"private":true,"type":"module"}\n');
+  await run('npm', ['link', npmPackageDir], {
+    cwd: npmConsumer,
+    env: authEnv(token)
+  });
+  await expectImportValue(npmConsumer, npmPackageName, `${npmPackageName}@${version}`, token);
+
+  const pnpmPackageName = `${scope}/pnpm-link-pkg`;
+  const pnpmPackageDir = await createPackage('pnpm-link-pkg', pnpmPackageName, token);
+  const pnpmConsumer = path.join(root, 'pnpm-link-consumer');
+  await mkdir(pnpmConsumer, { recursive: true });
+  await writeFile(path.join(pnpmConsumer, 'package.json'), '{"private":true,"type":"module"}\n');
+  await run('pnpm', ['add', `link:${pnpmPackageDir}`], {
+    cwd: pnpmConsumer,
+    env: authEnv(token)
+  });
+  await expectImportValue(pnpmConsumer, pnpmPackageName, `${pnpmPackageName}@${version}`, token);
 }
 
 async function createPackage(dirname, packageName, token) {
@@ -155,7 +199,9 @@ async function createPackage(dirname, packageName, token) {
         name: packageName,
         version,
         description: 'mini packages smoke package',
+        type: 'module',
         main: 'index.js',
+        exports: './index.js',
         files: ['index.js']
       },
       null,
@@ -164,6 +210,36 @@ async function createPackage(dirname, packageName, token) {
   );
   await writeFile(path.join(packageDir, 'index.js'), `export const value = '${packageName}@${version}';\n`);
   return packageDir;
+}
+
+async function expectNpmDistTag(packageName, tag, expected, token) {
+  const stdout = await runCapture('npm', ['dist-tag', 'ls', packageName, '--registry', baseUrl], {
+    cwd: root,
+    env: authEnv(token)
+  });
+  const actual = Object.fromEntries(
+    stdout
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => line.split(/:\s+/, 2))
+  )[tag];
+  if (actual !== expected) {
+    throw new Error(`${packageName} dist-tag ${tag} expected ${expected}, got ${actual}`);
+  }
+}
+
+async function expectImportValue(cwd, packageName, expected, token) {
+  const script = [
+    `const mod = await import(${JSON.stringify(packageName)});`,
+    `if (mod.value !== ${JSON.stringify(expected)}) {`,
+    `  throw new Error(${JSON.stringify(`unexpected linked value for ${packageName}`)} + ': ' + mod.value);`,
+    '}'
+  ].join('\n');
+  await run('node', ['--input-type=module', '-e', script], {
+    cwd,
+    env: authEnv(token)
+  });
 }
 
 function authEnv(token) {
@@ -177,6 +253,7 @@ function authEnv(token) {
     TMP: process.env.TMP,
     COREPACK_HOME: process.env.COREPACK_HOME,
     PNPM_HOME: process.env.PNPM_HOME,
+    CI: '1',
     NPM_CONFIG_USERCONFIG: path.join(root, '.npmrc'),
     npm_config_userconfig: path.join(root, '.npmrc'),
     npm_config_registry: baseUrl
@@ -195,6 +272,31 @@ function run(command, args, options = {}) {
         resolve();
       } else {
         reject(new Error(`${command} ${args.join(' ')} failed with exit ${code}`));
+      }
+    });
+  });
+}
+
+function runCapture(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      cwd: options.cwd || root,
+      env: options.env || process.env
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    child.on('exit', (code) => {
+      if (code === 0) {
+        resolve(stdout.trim());
+      } else {
+        reject(new Error(`${command} ${args.join(' ')} failed with exit ${code}\n${stderr || stdout}`));
       }
     });
   });

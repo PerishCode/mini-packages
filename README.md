@@ -45,6 +45,14 @@ Supported:
 - token create/list/get/rotate/revoke/claims
 - dist-tag list/add/remove with safe label validation
 
+## API Image Releases
+
+The API image is published by GitHub Actions only:
+
+- `release-beta` pushes `ghcr.io/perishcode/mini-packages-api:beta`
+- `release-stable` pushes `ghcr.io/perishcode/mini-packages-api:latest`
+- both workflows also push `sha-<commit>` for pinned deployments
+
 Out of scope for the core service:
 
 - upstream registry proxy/cache
@@ -53,4 +61,3 @@ Out of scope for the core service:
 - web management UI
 - public registry features
 - audit database
-

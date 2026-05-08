@@ -3,7 +3,9 @@ FROM rust:1.91-slim-bookworm AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
-RUN cargo build --release
+ARG APP_BUILD_SHA
+ARG APP_BUILD_TIMESTAMP
+RUN APP_BUILD_SHA="${APP_BUILD_SHA}" APP_BUILD_TIMESTAMP="${APP_BUILD_TIMESTAMP}" cargo build --release
 
 FROM debian:bookworm-slim
 
