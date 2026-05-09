@@ -60,6 +60,7 @@ async function verifyTokenLifecycle() {
     throw new Error(`token revoke failed: ${revokeResponse.status} ${await revokeResponse.text()}`);
   }
   await expectWhoami(rotated.token, 401);
+  await expectTokenAbsent(created.summary.id);
 }
 
 async function expectWhoami(token, status) {
@@ -92,6 +93,21 @@ async function createToken(name) {
     throw new Error(`token create failed: ${response.status} ${await response.text()}`);
   }
   return response.json();
+}
+
+async function expectTokenAbsent(tokenId) {
+  const response = await fetch(`${baseUrl}/api/v1/tokens`, {
+    headers: {
+      authorization: `Bearer ${bootstrapToken}`
+    }
+  });
+  if (!response.ok) {
+    throw new Error(`token list failed: ${response.status} ${await response.text()}`);
+  }
+  const tokens = await response.json();
+  if (tokens.some((token) => token.id === tokenId)) {
+    throw new Error(`revoked token still listed: ${tokenId}`);
+  }
 }
 
 async function writeNpmrc(dir, token) {
